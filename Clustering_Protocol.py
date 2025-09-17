@@ -1,0 +1,439 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue May 13 14:03:04 2025
+
+@author: Michael Lovemore, University of Pretoria, Biophysics Research Group -- Clustering Protocl 
+for Single Molecule Spectroscopy Data
+"""
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd   
+from   tabulate import tabulate
+from   pandasgui import show
+import seaborn as sns
+from sklearn.mixture import GaussianMixture
+from scipy.spatial.distance import cdist
+import matplotlib as mpl
+import matplotlib.cm as cm
+from matplotlib.patches import Ellipse
+from scipy.stats import chi2
+
+
+class SMS_clustering_protocol:
+    """ 
+    This function is a clustering algorithm used to cluster and sort clusters based on 
+    SMS lifetime and intensity data. It can be extended, but for the current version, it assumes a
+    pandas dataframe is used with the following columns, 'int' for intensity, 'particle' for 
+    porticle labels which are labelled as "Particle 1", ... , 'av_tau' for lifetimes,
+    'start' and 'end' for start and end times, and 'dwell' for dwell times. For the intensity trace
+    it also assumes a csv used for the raw data and column names need to be adjusted accordingly.
+    """
+    
+           
+    def __init__(self, dataframe):     
+        """
+        Initialize dataframe to be used throughout the class.
+        """
+        self.dataframe = dataframe   
+
+    def _draw_cluster_ellipse(self, mean, cov, ax, color, alpha=0.6, conf=0.95):
+        if cov.shape == (2, 2):
+            # Compute eigenvalues and eigenvectors
+            vals, vecs = np.linalg.eigh(cov)  # Use eigh for symmetric matrices
+            order = vals.argsort()[::-1]  # descending order
+            vals = vals[order]
+            vecs = vecs[:, order]
+
+            # Angle of ellipse (in degrees)
+            angle = np.degrees(np.arctan2(vecs[1, 0], vecs[0, 0]))
+
+            # Width and height = 2 * sqrt(eigenvalues) scaled by chi2
+            width, height = 2 * np.sqrt(vals * chi2.ppf(conf, df=2))
+        else:
+            angle = 0
+            width, height = 2 * np.sqrt(cov * chi2.ppf(conf, df=2))
+        
+        ell = Ellipse(
+                xy=mean,
+                width=width,
+                height=height,
+                angle=angle,
+                edgecolor=color,
+                facecolor='none',
+                lw=2,
+                alpha=alpha
+                )
+        ax.add_patch(ell)
+
+
+
+    def contour_plot(self, fontsize=30, xminn=0, xlim=4, ylim=4.5, yminn=0, levels=20, 
+                     numaxlabl=5):
+        """ 
+        This function returns a contour plot of the lifetime-intensity distribution.
+        """
+        dataframe = self.dataframe
+        int_data  = dataframe['int']# / 1000
+        tau_data  = dataframe['av_tau']
+
+        plt.figure(dpi=1000, figsize=(10, 6))
+        ax        = plt.gca()
+
+        # Plot KDE
+        sns.kdeplot(
+            x=int_data,
+            y=tau_data,
+            cmap='turbo',
+            bw_adjust=0.6,
+            fill=True,
+            alpha=0.75,
+            common_grid=True,
+            levels=levels,
+            ax=ax
+            )
+
+        contour_levels = np.linspace(0, 1, levels)
+        vmin           = contour_levels.min()
+        vmax           = contour_levels.max()
+
+        # Colorbar based on colormap and normalization
+        norm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+        sm   = mpl.cm.ScalarMappable(cmap='turbo', norm=norm)
+        sm.set_array([])
+
+        cbar = plt.colorbar(sm, ax=ax, pad=0.02)
+        cbar.ax.tick_params(labelsize=fontsize)
+
+        # Format colorbar ticks
+        ticks = cbar.get_ticks()
+        cbar.set_ticks(ticks)
+        cbar.set_ticklabels([f"{t:.2f}" for t in ticks])
+
+        # Plot formatting
+        ax.patch.set_facecolor('#36215e')
+        ax.set_xlabel('Intensity (kcounts/s)', fontsize=fontsize)
+        ax.set_ylabel('Lifetime (ns)', fontsize=fontsize)
+        ax.set_xlim(xminn, xlim)
+        ax.set_ylim(yminn, ylim)
+        ax.locator_params(axis='x', nbins=numaxlabl)
+        ax.locator_params(axis='y', nbins=numaxlabl)
+        ax.tick_params(labelsize=fontsize)
+        plt.tight_layout()
+        plt.show()
+
+    
+    def int_trace_plot(self, particle_id, time_res, fontsize = 30, numaxlabl = 6, xlim=25, ylim=3, 
+                       xmin=0, ymin=0):
+        """
+        This function accepts particle_id and time_res as an input, and generates the resolved
+        intensity trace, as well as the raw intensity trace
+        """
+        times, intensities = [], []
+        particle_df        = self.dataframe[self.dataframe["particle"] == particle_id]
+        
+        for _, row in particle_df.iterrows():
+            t = np.arange(row["start"], row["end"], time_res)
+            i = np.full_like(t, row["int"], dtype=float)
+            times.append(t)
+            intensities.append(i)
+        
+        df     = pd.read_csv("C:/Users/Mikey/Downloads/LHCII Traces/" + particle_id 
+                             + " trace (ROI).csv") 
+        x      = df['Bin Time (s)'].iloc[1:]   # column B, from row 2 onwards
+        y      = df['Bin Int (counts/100ms)'].iloc[1:]   # column C, from row 2 onwards
+        plt.figure(dpi=1000, figsize=(20, 6)) #make x 18 for longer looking trace
+        plt.step(x, y/100, color = 'grey')            
+        t_vals, i_vals = np.concatenate(times), np.concatenate(intensities)
+        i_vals = i_vals
+        
+        plt.step(t_vals, i_vals, label = f"Particle {particle_id}", linewidth = 2, color = 'green')
+        plt.xlabel("Time (s)",  fontsize=fontsize)
+        plt.ylabel("Intensity (kcounts/s)", fontsize=fontsize)
+        plt.xticks(fontsize=fontsize)  # X-axis tick labels
+        plt.yticks(fontsize=fontsize)  # Y-axis tick labels
+        plt.xlim(xmin, xlim)
+        plt.ylim(ymin, ylim)
+        plt.show()
+    
+    def find_nr_of_clusters(self, max_cluster,fontsize = 30, numaxlabl = 6, xlim=1, ylim=1, xmin=0, 
+                            ymin=0):
+        """
+        The function takes "max_cluster" as an input parameters. It sets the maximum nr of 
+        iterations to run and determine a BIC score plot for each GMM cluster. Once the function
+        has determined the BIC score for the set amount of clusters, it will return a scatterplot.
+        """
+        dataframe          = self.dataframe 
+        X                  = dataframe[['int', 'av_tau']]
+        bic_scores         = []
+        n_components_range = range(1, max_cluster + 1)
+        
+        for n_components in n_components_range:
+            gmm = GaussianMixture(n_components=n_components, random_state=42, n_init=5, 
+                                  covariance_type='full')
+            gmm.fit(X)
+            bic_scores.append(gmm.bic(X))
+            
+        plt.figure(dpi=150, figsize=(10, 6))
+        plt.plot(n_components_range, np.array(bic_scores)/np.max(bic_scores), 'go--', 
+                 markersize = 8) 
+        plt.xlabel('Number of clusters', fontsize=fontsize)
+        plt.ylabel('BIC', fontsize=fontsize)
+        plt.xticks(fontsize=fontsize)  # X-axis tick labels
+        plt.xlim(0, max_cluster+1)
+        plt.yticks(fontsize=fontsize)  # Y-axis tick labels
+        plt.locator_params(axis='x', nbins=numaxlabl)
+        plt.locator_params(axis='y', nbins=numaxlabl)
+        plt.xlim(xmin, xlim)
+        plt.ylim(ymin, ylim)
+        plt.show()
+        
+    
+        
+    def clustering_the_data(self, cluster_nr, fontsize=30, xminn=0, xlim=4, ylim=4.5, yminn=0, 
+                            levels=200, numaxlabl=5, conf = 0.95):
+        """
+        This function takes "cluster_nr" as an input parameter (typically chosen from the BIC score)
+        and clusters the data according using the designated number. This function also accepts
+        "conf" as an input, which stipulates the confidence for which to plot probability mass
+        ellipses about the centers of each cluster (black cross)
+        """
+        dataframe             = self.dataframe
+        int_data              = dataframe['int']
+        tau_data              = dataframe['av_tau']
+        dataframe['int_kcnt'] = int_data
+
+        X        = dataframe[['int_kcnt', 'av_tau']]
+        int_data = int_data 
+
+        gmm = GaussianMixture(cluster_nr, random_state=42, n_init=5, covariance_type='full')
+        gmm.fit(X)
+        clusters = gmm.predict(X)
+        dataframe['cluster'] = clusters
+
+        # Plot KDE with GMM cluster centers
+        plt.figure(dpi=1000, figsize=(10, 6))
+        ax = plt.gca()
+        
+        
+        # KDE Plot
+        sns.kdeplot(
+            x=int_data,
+            y=tau_data,
+            cmap='turbo',
+            bw_adjust=0.6,
+            fill=True,
+            alpha=0.75,
+            common_grid=True,
+            levels=levels,
+            ax=ax
+            )
+        
+        #Choose a colormap, e.g., 'tab10', 'viridis', 'plasma', etc.
+        colormap = cm.get_cmap('Paired', cluster_nr)  
+        colors = [colormap(i) for i in range(cluster_nr)]
+
+        # Plot cluster centers
+        centers = gmm.means_
+        plt.scatter(centers[:, 0], centers[:, 1], c='black', s=200, alpha=1, marker='X')
+
+        # Draw ellipses for each cluster
+        for i, (mean, cov) in enumerate(zip(gmm.means_, gmm.covariances_)):
+            color = colors[i % len(colors)]
+            self._draw_cluster_ellipse(mean, cov, ax, color, alpha=1, conf = conf)
+
+        # Fix colorbar (use full normalization range)
+        norm = mpl.colors.Normalize(vmin=0, vmax=1)
+        sm = mpl.cm.ScalarMappable(cmap='turbo', norm=norm)
+        sm.set_array([])
+
+        cbar = plt.colorbar(sm, ax=ax, pad=0.02)
+        ticks = cbar.get_ticks()
+        cbar.set_ticks(ticks)
+        cbar.set_ticklabels([f"{t:.2f}" for t in ticks])
+        cbar.ax.tick_params(labelsize=fontsize)
+
+        ax.patch.set_facecolor('#36215e')
+        plt.xlabel('Intensity (kcounts/s)', fontsize=fontsize)
+        plt.ylabel('Lifetime (ns)', fontsize=fontsize)
+        plt.xlim(xminn, xlim)
+        plt.ylim(yminn, ylim)
+        plt.locator_params(axis='x', nbins=numaxlabl)
+        plt.locator_params(axis='y', nbins=numaxlabl)
+        plt.xticks(fontsize=fontsize)
+        plt.yticks(fontsize=fontsize)
+        
+        # Sort and label centers 
+        int_centres = centers[:, 0] 
+        tau_centers = centers[:, 1] 
+        sorted_centers = sorted(zip(int_centres, tau_centers)) 
+        int_cent_sort, tau_cent_sort = zip(*sorted_centers) 
+        for i, (x, y) in enumerate(zip(int_cent_sort, tau_cent_sort)): 
+            plt.text(x + 0.05, y + 0.05, f"{i+1}", color='black', fontsize=fontsize, 
+                     fontweight='bold')
+        
+        plt.tight_layout()
+        plt.show()
+
+        self.centers  = centers
+        self.clusters = clusters
+
+
+    
+    def make_cluster_centre_df(self):
+        """
+        This function makes a dataframe from the cluster centres as it is a readily used 
+        reference throughout the rest of the data analysis.
+        """
+        return pd.DataFrame(self.centers)
+    
+    def sort_cluster_centres(self):
+        """ 
+        This function Takes the cluster-center coordinates and reorganizes them in order. This
+        is neccesary as the order in which GMM cluster components are generated are typically
+        not useable or relevant.
+        """
+        centers                       = self.centers
+        int_centres                   = centers[:, 0]
+        tau_centers                   = centers[:, 1]
+        sorted_centers                = sorted(zip(int_centres, tau_centers))
+        int_cent_sort, tau_cent_sort  = zip(*sorted_centers)
+        int_cent_sort                 = list(int_cent_sort)
+        tau_cent_sort                 = list(tau_cent_sort)
+        self.sorted_int_centres       = int_cent_sort
+        self.sorted_tau_centres       = tau_cent_sort
+        return (int_cent_sort, tau_cent_sort)
+    
+    
+    
+    def get_ordered_clusters(self, int_centres):
+        """ 
+        This function allows input of "int_centres", typically acquired after running the 
+        "sort_cluster_centres" function, and returns the cluster labels from GMM in order of 
+        increasing intensites. The order is returned as a list (eg 0, 2, 1) which is to be used
+        as an input to the "get_dwells_of_sorted_clusters" function.
+        """
+        dataframe            = self.dataframe 
+        cluster_ordered      = []
+        for i in range(len(int_centres)):
+            mean_int         = dataframe[dataframe['cluster'] == i]['int'].mean()
+            print(f"cluster {i}: {mean_int}")
+            cluster_ordered.append((i, mean_int))
+            
+        cluster_ordered_sorted = sorted(cluster_ordered, key=lambda x: x[1])
+        print(cluster_ordered_sorted)
+        
+        return(cluster_ordered_sorted)
+    
+    def get_dwells_of_sorted_clusters(self, dataframe, cluster_ordered_sorted):
+        """
+        This function takes "dataframe" and "cluster_ordered_sorted" as an input. To be accurate,
+        this function inherits dataframe prof its parent function, but if a different dataframe is
+        to be analyzed, then the "dataframe" input can be called. The output of the
+        "get_ordered_clusters" function is typically used as the input for "cluster_ordered_sorted".
+        This function returns the average and total dwell times for the different clusters, and the
+        nr of data points in that cluster.
+        """
+        
+        
+        for index, (cluster_label, mean_int) in enumerate(cluster_ordered_sorted):
+            print(f"S{index}_dwell_tot", dataframe[dataframe['cluster']  == 
+                                                   cluster_label]['dwell'].sum())
+            print(f"S{index}_dwell_mean", dataframe[dataframe['cluster'] == 
+                                                    cluster_label]['dwell'].mean())
+            print(f"Nr of Data Points in S{index}", len(dataframe[dataframe['cluster'] == 
+                                                                  cluster_label]))
+        
+        
+    def filtered_IQR_data_to_df(self, IQR_Coeff, centre_df ):
+        """ 
+        This function allows input of "IQR_Coeff" and "centre_df". It removes the outliers of the 
+        post-clustered data via a modified IQR detection rule by eliminating data that lay 
+        "IQR_Coeff" * IQR away from the median of "centre_df"
+        """
+        dataframe            = self.dataframe 
+        distances            = cdist(dataframe[['int', 'av_tau']].values, centre_df.values)
+        min_dist             = np.min(distances, axis=1)
+        median_dist          = np.median(min_dist)
+        q75, q25             = np.percentile(min_dist, [75, 25])
+        iqr                  = q75 - q25
+        threshold_distance   = median_dist + IQR_Coeff * iqr
+        return (dataframe[min_dist <= threshold_distance])
+    
+    def rate_freq_dwelltime(self, full_df, lower_cluster, upper_cluster):    
+        """ 
+        This function takes "full_df" as an input for a desired dataframe, and allows input of
+        two population labels, namely "lower_cluster" and "upper_cluster". It determines the
+        switching rate, frequency and dwell times of the switches between the two input populations.
+        """
+        
+        Q_to_U_swtch                 = 0
+        U_to_Q_swtch                 = 0
+        dwell_time_list              = full_df['dwell'].to_list()
+                         
+        for i in range(0, len(full_df)-1):
+            if full_df['cluster'].iloc[i]==lower_cluster:
+                if full_df['cluster'].iloc[i+1]==lower_cluster:
+                    pass
+                elif full_df['cluster'].iloc[i+1]==upper_cluster:
+                    Q_to_U_swtch = Q_to_U_swtch + 1
+            elif full_df['cluster'].iloc[i]==upper_cluster:
+                if full_df['cluster'].iloc[i+1]==lower_cluster:
+                    U_to_Q_swtch = U_to_Q_swtch + 1
+                elif full_df['cluster'].iloc[i+1]==upper_cluster:
+                    pass
+                
+        unquench_dwell_t = full_df[full_df['cluster'] == upper_cluster]['dwell'].sum()
+        quench_dwell_t   = full_df[full_df['cluster'] == lower_cluster]['dwell'].sum()      
+       
+            
+        k_UQ                         = U_to_Q_swtch/unquench_dwell_t
+        
+        k_QU                         = Q_to_U_swtch/quench_dwell_t
+        
+        switching_freq               = (Q_to_U_swtch + U_to_Q_swtch)/   \
+                                       (quench_dwell_t + unquench_dwell_t)
+                                       
+                                       
+        results_dict                 = {'kQU': [k_QU], 'kuq ': [k_UQ],
+                                        'switching_freq': [switching_freq],
+                                        'Q Dwell time': [quench_dwell_t],
+                                        'U Dwell time': [unquench_dwell_t],
+                                        'Nr of Q to U switches': [Q_to_U_swtch],
+                                        'Nr of U to Q switches': [U_to_Q_swtch]
+                                        }
+        df = pd.DataFrame(results_dict)
+        show(df)
+        print(tabulate(df, headers = 'keys', tablefmt = 'psql'))
+    
+    def weighted_int_and_tau(self, df):
+        """ 
+        This function allows input of "df", a pandas dataframe, and computes the weighted
+        average intensity and lifetime, weighted by the dwell times.
+        """
+        weighted_avg_int    = (df['int'] * df['dwell']).sum() / df['dwell'].sum()
+        weighted_avg_av_tau = (df['av_tau'] * df['dwell']).sum() / df['dwell'].sum()
+        w                   = df['dwell']
+        x                   = df['av_tau']
+        x_w                 = (x * w).sum() / w.sum()
+      
+        int_var = ((df['dwell'] * (df['int'] - weighted_avg_int) ** 2).sum() / df['dwell'].sum())
+        
+        tau_var = ( (w * (x - x_w)**2).sum() ) / ( w.sum() - (w**2).sum()/w.sum() )
+        weighted_std_int = int_var ** 0.5
+        weighted_std_tau = tau_var ** 0.5
+
+        print('weighted ave int =', weighted_avg_int, '±', weighted_std_int)
+        print('weighted ave tau =', weighted_avg_av_tau, '±', weighted_std_tau)
+
+        
+    def determining_cluster_lifetimes(self, df, cluster_ordered_sorted):
+        """ 
+        This function allows input of the dataframe "df" and the sorted clusters in order attained
+        from the previous functions, as an input parameter "cluster_ordered_sorted" and determines
+        the lifetimes and errors for each cluster. 
+        """
+        for index, (cluster_label, mean_int) in enumerate(cluster_ordered_sorted):
+            filter_df = df[df['cluster'] == index]['av_tau']
+            print(f"Ave S{index}", filter_df.mean(), '+-', filter_df.std())
+            
+   
