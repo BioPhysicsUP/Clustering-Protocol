@@ -13,10 +13,13 @@ from   pandasgui import show
 import seaborn as sns
 from sklearn.mixture import GaussianMixture
 from scipy.spatial.distance import cdist
+import seaborn as sns
 import matplotlib as mpl
 import matplotlib.cm as cm
 from matplotlib.patches import Ellipse
 from scipy.stats import chi2
+from scipy.spatial.distance import mahalanobis
+from scipy.optimize import linear_sum_assignment
 
 
 class SMS_clustering_protocol:
@@ -37,48 +40,49 @@ class SMS_clustering_protocol:
         self.dataframe = dataframe   
 
     def _draw_cluster_ellipse(self, mean, cov, ax, color, alpha=0.6, conf=0.95):
-        if cov.shape == (2, 2):
-            # Compute eigenvalues and eigenvectors
-            vals, vecs = np.linalg.eigh(cov)  # Use eigh for symmetric matrices
-            order = vals.argsort()[::-1]  # descending order
-            vals = vals[order]
-            vecs = vecs[:, order]
-
-            # Angle of ellipse (in degrees)
-            angle = np.degrees(np.arctan2(vecs[1, 0], vecs[0, 0]))
-
-            # Width and height = 2 * sqrt(eigenvalues) scaled by chi2
-            width, height = 2 * np.sqrt(vals * chi2.ppf(conf, df=2))
-        else:
-            angle = 0
-            width, height = 2 * np.sqrt(cov * chi2.ppf(conf, df=2))
-        
-        ell = Ellipse(
-                xy=mean,
-                width=width,
-                height=height,
-                angle=angle,
-                edgecolor=color,
-                facecolor='none',
-                lw=2,
-                alpha=alpha
-                )
-        ax.add_patch(ell)
-
+            if cov.shape == (2, 2):
+                # Compute eigenvalues and eigenvectors
+                vals, vecs = np.linalg.eigh(cov)  # Use eigh for symmetric matrices
+                order = vals.argsort()[::-1]  # descending order
+                vals = vals[order]
+                vecs = vecs[:, order]
+    
+                # Angle of ellipse (in degrees)
+                angle = np.degrees(np.arctan2(vecs[1, 0], vecs[0, 0]))
+    
+                # Width and height = 2 * sqrt(eigenvalues) scaled by chi2
+                width, height = 2 * np.sqrt(vals * chi2.ppf(conf, df=2))
+            else:
+                angle = 0
+                width, height = 2 * np.sqrt(cov * chi2.ppf(conf, df=2))
+            
+            ell = Ellipse(
+                    xy=mean,
+                    width=width,
+                    height=height,
+                    angle=angle,
+                    edgecolor=color,
+                    facecolor='none',
+                    lw=2,
+                    alpha=alpha
+                    )
+            ax.add_patch(ell)
 
 
     def contour_plot(self, fontsize=30, xminn=0, xlim=4, ylim=4.5, yminn=0, levels=20, 
-                     numaxlabl=5):
+                     numaxlabl=5, xdata = 'int', ydata = 'av_tau', xlbl = 'Intensity (kcounts/s)', ylbl = 'Lifetime (ns)'):
         """ 
         This function returns a contour plot of the lifetime-intensity distribution.
         """
         dataframe = self.dataframe
-        int_data  = dataframe['int']# / 1000
-        tau_data  = dataframe['av_tau']
-
+        int_data  = dataframe[xdata]# / 1000
+        tau_data  = dataframe[ydata]
+        
+        
+        
         plt.figure(dpi=1000, figsize=(10, 6))
         ax        = plt.gca()
-
+        
         # Plot KDE
         sns.kdeplot(
             x=int_data,
@@ -91,6 +95,8 @@ class SMS_clustering_protocol:
             levels=levels,
             ax=ax
             )
+        
+        #plt.scatter(int_data, tau_data, s=100, alpha=0.7, color = 'red')
 
         contour_levels = np.linspace(0, 1, levels)
         vmin           = contour_levels.min()
@@ -111,8 +117,8 @@ class SMS_clustering_protocol:
 
         # Plot formatting
         ax.patch.set_facecolor('#36215e')
-        ax.set_xlabel('Intensity (kcounts/s)', fontsize=fontsize)
-        ax.set_ylabel('Lifetime (ns)', fontsize=fontsize)
+        ax.set_xlabel(xlbl, fontsize=fontsize)
+        ax.set_ylabel(ylbl, fontsize=fontsize)
         ax.set_xlim(xminn, xlim)
         ax.set_ylim(yminn, ylim)
         ax.locator_params(axis='x', nbins=numaxlabl)
@@ -155,42 +161,166 @@ class SMS_clustering_protocol:
         plt.ylim(ymin, ylim)
         plt.show()
     
-    def find_nr_of_clusters(self, max_cluster,fontsize = 30, numaxlabl = 6, xlim=1, ylim=1, xmin=0, 
-                            ymin=0):
-        """
-        The function takes "max_cluster" as an input parameters. It sets the maximum nr of 
-        iterations to run and determine a BIC score plot for each GMM cluster. Once the function
-        has determined the BIC score for the set amount of clusters, it will return a scatterplot.
-        """
-        dataframe          = self.dataframe 
-        X                  = dataframe[['int', 'av_tau']]
-        bic_scores         = []
-        n_components_range = range(1, max_cluster + 1)
-        
-        for n_components in n_components_range:
-            gmm = GaussianMixture(n_components=n_components, random_state=42, n_init=5, 
-                                  covariance_type='full')
+
+
+    def find_nr_of_clusters(self, max_cluster=10, conf=0.95, fontsize=30, numaxlabl=10,
+                            xlim=1, xmin=0, ymin=0, ylim=1, rel_drop_factor=0.5):
+    
+        X = self.dataframe[['int', 'av_tau']].values
+        n_samples = X.shape[0]
+    
+        scores_dict = {'AIC': [], 'BIC': [], 'ICL': []}
+        assignments_all, gmms_all = [], []
+    
+        # Fit GMMs
+        for k in range(1, max_cluster + 1):
+            gmm = GaussianMixture(n_components=k, random_state=42, n_init=5, covariance_type='full')
             gmm.fit(X)
-            bic_scores.append(gmm.bic(X))
-            
+            clusters = gmm.predict(X)
+    
+            aic = gmm.aic(X)
+            bic = gmm.bic(X)
+            tau = gmm.predict_proba(X)
+            icl = bic - np.sum(tau * np.log(tau + 1e-12))
+    
+            scores_dict['AIC'].append(aic)
+            scores_dict['BIC'].append(bic)
+            scores_dict['ICL'].append(icl)
+    
+            assignments_all.append(clusters)
+            gmms_all.append(gmm)
+    
+        # Compute Mahalanobis-based tightness
+        results = {'AIC': [], 'BIC': [], 'ICL': []}
+        for idx, k in enumerate(range(1, max_cluster + 1)):
+            clusters = assignments_all[idx]
+            gmm = gmms_all[idx]
+            means = gmm.means_
+            covs = gmm.covariances_
+    
+            D2_all = np.zeros(n_samples)
+            for i in range(k):
+                idx_i = clusters == i
+                if not np.any(idx_i):
+                    continue
+                Xk = X[idx_i]
+                mu = means[i]
+                cov = covs[i]
+                inv_cov = np.linalg.inv(cov)
+                diff = Xk - mu
+                D2_all[idx_i] = np.einsum('ij,jk,ik->i', diff, inv_cov, diff)
+    
+            chi2_theory = chi2.ppf(conf, df=2)
+            tightness_list, frac_outside_list = [], []
+            for i in range(k):
+                D2k = D2_all[clusters == i]
+                if len(D2k) == 0:
+                    tightness_list.append(np.nan)
+                    frac_outside_list.append(np.nan)
+                    continue
+                tightness_list.append(np.mean(D2k))
+                frac_outside_list.append(np.mean(D2k > chi2_theory))
+    
+            avg_tightness = np.nanmean(tightness_list)
+            frac_outside = np.nanmean(frac_outside_list)
+    
+            results['AIC'].append({'k': k, 'score': scores_dict['AIC'][idx],
+                                   'avg_tightness': avg_tightness, 'frac_outside': frac_outside})
+            results['BIC'].append({'k': k, 'score': scores_dict['BIC'][idx],
+                                   'avg_tightness': avg_tightness, 'frac_outside': frac_outside})
+            results['ICL'].append({'k': k, 'score': scores_dict['ICL'][idx],
+                                   'avg_tightness': avg_tightness, 'frac_outside': frac_outside})
+    
+        # Candidate selection using normalized IC and statistical ΔIC threshold
+        def candidate_clusters_stat(scores, rel_drop_factor=rel_drop_factor):
+            scores = np.array(scores)
+            # normalize
+            scores_norm = scores / np.max(scores)
+            ΔIC = np.diff(scores_norm)  # IC[k] - IC[k-1], negative is improvement
+            std_drop = np.std(ΔIC)
+            threshold = -rel_drop_factor * std_drop  # significant negative drops
+            candidates = []
+    
+            # first cluster
+            if ΔIC[0] < 0:
+                candidates.append(2)
+    
+            # middle clusters
+            for i in range(1, len(ΔIC)):
+                # big negative improvement
+                if ΔIC[i] < threshold:
+                    candidates.append(i+2)
+                # local minima: IC lower than neighbors
+                if i < len(scores_norm)-1 and scores_norm[i] < scores_norm[i-1] and scores_norm[i] < scores_norm[i+1]:
+                    candidates.append(i+1)
+    
+            return sorted(set(candidates))
+    
+        top_candidates = {}
+        for metric in ['AIC','BIC','ICL']:
+            scores = [r['score'] for r in results[metric]]
+            candidate_k = candidate_clusters_stat(scores)
+            # filter by fraction outside
+            candidates = [r for r in results[metric] if r['k'] in candidate_k and r['frac_outside'] < 0.2]
+            # rank by IC + tightness
+            top_candidates[metric] = sorted(candidates, key=lambda r: (r['score'], r['avg_tightness']))
+    
+            print(f"\nCandidate clusters for {metric}:")
+            for r in top_candidates[metric]:
+                k = r['k']
+                # compute backward delta for this cluster
+                if k == 1:
+                    delta_val = np.nan
+                else:
+                    delta_val = scores_dict[metric][k-2] - scores_dict[metric][k-1]
+                print(f"k={k}, {metric}={r['score']:.3f}, Δ{metric}={delta_val:.3f}, "
+                      f"Avg tightness={r['avg_tightness']:.3f}, Frac outside={r['frac_outside']:.4f}")
+
+    
+        # Plot IC curves with annotated candidates
+        
+        
+        aic_scores = scores_dict['AIC']
+        bic_scores = scores_dict['BIC']
+        icl_scores = scores_dict['ICL']
+        aic_norm = aic_scores / np.max(aic_scores)
+        bic_norm = bic_scores / np.max(bic_scores)
+        icl_norm = icl_scores / np.max(icl_scores)
+        
+        
+        
+        n_components_range = np.arange(1, max_cluster + 1)
         plt.figure(dpi=150, figsize=(10, 6))
-        plt.plot(n_components_range, np.array(bic_scores)/np.max(bic_scores), 'go--', 
-                 markersize = 8) 
+        n_components_range = range(1, max_cluster + 1)
+        plt.plot(n_components_range, aic_norm, 'ro--', markersize=8, label="AIC")
+        plt.plot(n_components_range, bic_norm, 'go--', markersize=8, label="BIC")
+        plt.plot(n_components_range, icl_norm, 'bo--', markersize=8, label="ICL")
         plt.xlabel('Number of clusters', fontsize=fontsize)
-        plt.ylabel('BIC', fontsize=fontsize)
-        plt.xticks(fontsize=fontsize)  # X-axis tick labels
-        plt.xlim(0, max_cluster+1)
-        plt.yticks(fontsize=fontsize)  # Y-axis tick labels
+        plt.ylabel('Normalized IC', fontsize=fontsize)
+        plt.xticks(fontsize=fontsize)
+        plt.yticks(fontsize=fontsize)
         plt.locator_params(axis='x', nbins=numaxlabl)
         plt.locator_params(axis='y', nbins=numaxlabl)
         plt.xlim(xmin, xlim)
         plt.ylim(ymin, ylim)
+        plt.legend(fontsize=fontsize)
         plt.show()
-        
+    
+        return top_candidates
+
+
+
+
+
+
+
+
+
+
     
         
     def clustering_the_data(self, cluster_nr, fontsize=30, xminn=0, xlim=4, ylim=4.5, yminn=0, 
-                            levels=200, numaxlabl=5, conf = 0.95):
+                            levels=200, numaxlabl=5, conf = 0.95, xdata = 'int', ydata = 'av_tau', xlbl = 'Intensity (kcounts/s)', ylbl = 'Lifetime (ns)'):
         """
         This function takes "cluster_nr" as an input parameter (typically chosen from the BIC score)
         and clusters the data according using the designated number. This function also accepts
@@ -198,8 +328,8 @@ class SMS_clustering_protocol:
         ellipses about the centers of each cluster (black cross)
         """
         dataframe             = self.dataframe
-        int_data              = dataframe['int']
-        tau_data              = dataframe['av_tau']
+        int_data              = dataframe[xdata]
+        tau_data              = dataframe[ydata]
         dataframe['int_kcnt'] = int_data
 
         X        = dataframe[['int_kcnt', 'av_tau']]
@@ -209,6 +339,55 @@ class SMS_clustering_protocol:
         gmm.fit(X)
         clusters = gmm.predict(X)
         dataframe['cluster'] = clusters
+        
+        X_np = X.values
+        means = gmm.means_
+        covs  = gmm.covariances_
+        
+        D2_all = np.zeros(len(X_np))
+
+        for k in range(cluster_nr):
+            idx = clusters == k
+            if not np.any(idx):
+                continue
+
+            Xk = X_np[idx]
+            mu = means[k]
+            cov = covs[k]
+            inv_cov = np.linalg.inv(cov)
+
+            diff = Xk - mu
+            D2 = np.einsum('ij,jk,ik->i', diff, inv_cov, diff)
+            D2_all[idx] = D2
+        
+        chi2_theory = chi2.ppf(conf, df=2)
+        
+        cluster_tightness = []
+        cluster_frac_outside = []
+
+        for k in range(cluster_nr):
+            D2k = D2_all[clusters == k]
+            if len(D2k) == 0:
+                cluster_tightness.append(np.nan)
+                cluster_frac_outside.append(np.nan)
+                continue
+
+            cluster_tightness.append(np.mean(D2k))
+            cluster_frac_outside.append(np.mean(D2k > chi2_theory))
+            print('For conf =', conf, 'D2=', chi2_theory)
+            print('For cluster k =', k+1)
+            print('Cluster Tightness params = ', cluster_tightness[k])
+            print('Frac outside cluster = ', cluster_frac_outside[k])
+            
+            
+        
+            
+        print('Mean Tightness =', np.mean(np.array(cluster_tightness)))
+        print('Mean Frac outside =', np.mean(np.array(cluster_frac_outside)))
+            
+        
+
+        
 
         # Plot KDE with GMM cluster centers
         plt.figure(dpi=1000, figsize=(10, 6))
@@ -231,13 +410,13 @@ class SMS_clustering_protocol:
         #Choose a colormap, e.g., 'tab10', 'viridis', 'plasma', etc.
         colormap = cm.get_cmap('Paired', cluster_nr)  
         colors = [colormap(i) for i in range(cluster_nr)]
-
+        #plt.scatter(int_data, tau_data, s=100, alpha=0.7, color = 'red')
         # Plot cluster centers
         centers = gmm.means_
         plt.scatter(centers[:, 0], centers[:, 1], c='black', s=200, alpha=1, marker='X')
 
         # Draw ellipses for each cluster
-        for i, (mean, cov) in enumerate(zip(gmm.means_, gmm.covariances_)):
+        for i, (mean, cov) in enumerate(zip(means, covs)):
             color = colors[i % len(colors)]
             self._draw_cluster_ellipse(mean, cov, ax, color, alpha=1, conf = conf)
 
@@ -253,8 +432,8 @@ class SMS_clustering_protocol:
         cbar.ax.tick_params(labelsize=fontsize)
 
         ax.patch.set_facecolor('#36215e')
-        plt.xlabel('Intensity (kcounts/s)', fontsize=fontsize)
-        plt.ylabel('Lifetime (ns)', fontsize=fontsize)
+        plt.xlabel(xlbl, fontsize=fontsize)
+        plt.ylabel(ylbl, fontsize=fontsize)
         plt.xlim(xminn, xlim)
         plt.ylim(yminn, ylim)
         plt.locator_params(axis='x', nbins=numaxlabl)
@@ -273,18 +452,64 @@ class SMS_clustering_protocol:
         
         plt.tight_layout()
         plt.show()
+        
+        
+        # plt.figure(dpi=1000, figsize=(10, 6))
+        # plt.scatter(int_data, tau_data, s=30, alpha=0.7)
+        # plt.xlabel("Spectral Peak Position (nm)")
+        # plt.ylabel("FWHM (nm)")
+        # plt.title("Simulated FWHM vs Spectral Peak")
+        # for i, (mean, cov) in enumerate(zip(means, covs)):
+        #     color = colors[i % len(colors)]
+        #     self._draw_cluster_ellipse(mean, cov, ax, color, alpha=1, conf = conf)
+        # for i, (x, y) in enumerate(zip(int_cent_sort, tau_cent_sort)): 
+        #     plt.text(x + 0.05, y + 0.05, f"{i+1}", color='black', fontsize=fontsize, 
+        #              fontweight='bold')
+        # plt.show()
+        
 
         self.centers  = centers
         self.clusters = clusters
-
-
+        self.covs     = gmm.covariances_
+        
+        return (centers)
     
+    def ground_truth_recovery(self, true_states, gmm_means, int_lbl = "mean_intensity", tau_lbl = "lifetime_mean" ):
+        """ Both have array shape (n_states, 2) -> [int, tau] """
+        
+        true_centers = np.array([[v[int_lbl]/1000, v[tau_lbl]] 
+                             for v in true_states.values()])
+
+        # Compute distance matrix
+        D = np.linalg.norm(true_centers[:, None, :] - gmm_means[None, :, :], axis=2)
+    
+        # Hungarian algorithm for optimal matching
+        row_ind, col_ind = linear_sum_assignment(D)
+
+        mean_int_error = np.abs(true_centers[row_ind, 0] - gmm_means[col_ind, 0])
+        mean_tau_error = np.abs(true_centers[row_ind, 1] - gmm_means[col_ind, 1])
+        rmse = np.sqrt(np.mean(D[row_ind, col_ind]**2))
+
+        errors = {
+            "mean_int_error": mean_int_error,
+            "mean_tau_error": mean_tau_error,
+            "rmse": rmse,
+            "mapping": (row_ind, col_ind)
+            }
+        return errors
+        
+        
+        
     def make_cluster_centre_df(self):
         """
         This function makes a dataframe from the cluster centres as it is a readily used 
         reference throughout the rest of the data analysis.
         """
         return pd.DataFrame(self.centers)
+    
+    def get_means_and_covs(self):
+        """fff"""
+        return self.centers, self.covs
     
     def sort_cluster_centres(self):
         """ 
@@ -316,7 +541,8 @@ class SMS_clustering_protocol:
         cluster_ordered      = []
         for i in range(len(int_centres)):
             mean_int         = dataframe[dataframe['cluster'] == i]['int'].mean()
-            print(f"cluster {i}: {mean_int}")
+            mean_tau         = dataframe[dataframe['cluster'] == i]['av_tau'].mean()
+            print(f"cluster {i}: {mean_int}, {mean_tau}") 
             cluster_ordered.append((i, mean_int))
             
         cluster_ordered_sorted = sorted(cluster_ordered, key=lambda x: x[1])
@@ -433,7 +659,7 @@ class SMS_clustering_protocol:
         the lifetimes and errors for each cluster. 
         """
         for index, (cluster_label, mean_int) in enumerate(cluster_ordered_sorted):
-            filter_df = df[df['cluster'] == index]['av_tau']
+            filter_df = df[df['cluster'] == cluster_label]['av_tau']
             print(f"Ave S{index}", filter_df.mean(), '+-', filter_df.std())
             
    
